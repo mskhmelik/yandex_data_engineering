@@ -1,5 +1,4 @@
-/* Create single table from all sources. Bring additional columns if they are missing in source */
-
+/* 1. Create single table from all sources. Bring additional columns if they are missing in source */
 DROP TABLE IF EXISTS df_temp_summary;
 
 CREATE TEMP TABLE df_temp_summary AS
@@ -79,12 +78,39 @@ df_temp_3 AS (
         ON o.craftsman_id = c.craftsman_id
     JOIN source3.craft_market_customers cu 
         ON o.customer_id = cu.customer_id
+),
+df_temp_4 AS (
+    SELECT  
+        cpo.order_id,
+        cpo.order_created_date,
+        cpo.order_completion_date,
+        cpo.order_status,
+        cpo.craftsman_id,
+        cpo.craftsman_name,
+        cpo.craftsman_address,
+        cpo.craftsman_birthday,
+        cpo.craftsman_email,
+        cpo.product_id,
+        cpo.product_name,
+        cpo.product_description,
+        cpo.product_type,
+        cpo.product_price,
+        c.customer_id,
+        c.customer_name,
+        c.customer_address,
+        c.customer_birthday,
+        c.customer_email 
+    FROM external_source.craft_products_orders cpo
+    JOIN external_source.customers c 
+        USING (customer_id)
 )
 SELECT * FROM df_temp_1
 UNION
 SELECT * FROM df_temp_2
 UNION
-SELECT * FROM df_temp_3;
+SELECT * FROM df_temp_3
+UNION
+SELECT * FROM df_temp_4;
 
 /* 2. Update records for craftsmen, but only if they don't exist in DWH */
 MERGE INTO dwh.d_craftsman d
