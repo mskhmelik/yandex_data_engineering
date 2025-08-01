@@ -156,3 +156,37 @@ WHEN NOT MATCHED THEN
         current_timestamp
     );
 
+/* 4. Update records for customers, but only if they don't exist in DWH */
+MERGE INTO dwh.d_customer d
+USING (
+    SELECT DISTINCT 
+        customer_name, 
+        customer_address, 
+        customer_birthday, 
+        customer_email 
+    FROM df_temp_summary
+) AS df_temp_customer
+ON d.customer_name = df_temp_customer.customer_name
+   AND d.customer_email = df_temp_customer.customer_email
+
+WHEN MATCHED THEN
+    UPDATE SET 
+        customer_address = df_temp_customer.customer_address,
+        customer_birthday = df_temp_customer.customer_birthday,
+        load_dttm = current_timestamp
+
+WHEN NOT MATCHED THEN
+    INSERT (
+        customer_name, 
+        customer_address, 
+        customer_birthday, 
+        customer_email, 
+        load_dttm
+    )
+    VALUES (
+        df_temp_customer.customer_name, 
+        df_temp_customer.customer_address, 
+        df_temp_customer.customer_birthday, 
+        df_temp_customer.customer_email, 
+        current_timestamp
+    );
