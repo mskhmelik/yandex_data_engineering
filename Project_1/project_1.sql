@@ -1,3 +1,5 @@
+/* Create single table from all sources. Bring additional columns if they are missing in source */
+
 DROP TABLE IF EXISTS df_temp_summary;
 
 CREATE TEMP TABLE df_temp_summary AS
