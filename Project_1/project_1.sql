@@ -120,3 +120,39 @@ WHEN NOT MATCHED THEN
         df_temp_craftsman.craftsman_email, 
         current_timestamp
     );
+
+/* 3. Update records for craftsmen, but only if they don't exist in DWH */
+MERGE INTO dwh.d_product d
+USING (
+    SELECT DISTINCT 
+        product_name, 
+        product_description, 
+        product_type, 
+        product_price 
+    FROM df_temp_summary
+) AS df_temp_product
+ON d.product_name = df_temp_product.product_name
+   AND d.product_description = df_temp_product.product_description
+   AND d.product_price = df_temp_product.product_price
+
+WHEN MATCHED THEN
+    UPDATE SET 
+        product_type = df_temp_product.product_type,
+        load_dttm = current_timestamp
+
+WHEN NOT MATCHED THEN
+    INSERT (
+        product_name, 
+        product_description, 
+        product_type, 
+        product_price, 
+        load_dttm
+    )
+    VALUES (
+        df_temp_product.product_name, 
+        df_temp_product.product_description, 
+        df_temp_product.product_type, 
+        df_temp_product.product_price, 
+        current_timestamp
+    );
+
