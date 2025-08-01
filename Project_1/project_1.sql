@@ -85,3 +85,38 @@ UNION
 SELECT * FROM df_temp_2
 UNION
 SELECT * FROM df_temp_3;
+
+/* 2. Update records for craftsmen, but only if they don't exist in DWH */
+MERGE INTO dwh.d_craftsman d
+USING (
+    SELECT DISTINCT 
+        craftsman_name, 
+        craftsman_address, 
+        craftsman_birthday, 
+        craftsman_email 
+    FROM df_temp_summary
+) AS df_temp_craftsman
+ON d.craftsman_name = df_temp_craftsman.craftsman_name
+   AND d.craftsman_email = df_temp_craftsman.craftsman_email
+
+WHEN MATCHED THEN
+    UPDATE SET 
+        craftsman_address = df_temp_craftsman.craftsman_address,
+        craftsman_birthday = df_temp_craftsman.craftsman_birthday,
+        load_dttm = current_timestamp
+
+WHEN NOT MATCHED THEN
+    INSERT (
+        craftsman_name, 
+        craftsman_address, 
+        craftsman_birthday, 
+        craftsman_email, 
+        load_dttm
+    )
+    VALUES (
+        df_temp_craftsman.craftsman_name, 
+        df_temp_craftsman.craftsman_address, 
+        df_temp_craftsman.craftsman_birthday, 
+        df_temp_craftsman.craftsman_email, 
+        current_timestamp
+    );
