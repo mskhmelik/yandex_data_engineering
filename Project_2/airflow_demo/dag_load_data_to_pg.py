@@ -49,7 +49,7 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     rows = list(df.itertuples(index=False, name=None))
     
     # Connect to Postgres using connection arguments
-    with psycopg2.connect(**conn_params) as conn:
+    with psycopg2.connect(**conn_args) as conn:
         with conn.cursor() as cur:
             cur.execute(stmt_create_schema)
             cur.execute(stmt_create_table)

@@ -17,7 +17,7 @@ dag = DAG(
 )
 
 def download_from_s3(file_names):
-    base_url = "https://storage.yandexcloud.net/s3-sprint3-static/lessons/"
+    base_url = r"https://storage.yandexcloud.net/s3-sprint3-static/lessons/"
     out_dir = DIR_DATA
     os.makedirs(out_dir, exist_ok=True)
 
