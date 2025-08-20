@@ -9,7 +9,7 @@ from airflow import DAG
 from airflow.hooks.base import BaseHook
 from airflow.operators.python import PythonOperator
 
-DIR_DATA = os.path.join(os.getcwd(), "data")
+DATA_DIR = Path.cwd() / "data"
 
 dag = DAG(
     dag_id="transform_data",
@@ -22,27 +22,51 @@ dag = DAG(
 def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     """
     Load a CSV file into Postgres stage schema.
-    """
-    
+    """   
+    # Read the CSV file into a DataFrame and prepare for insertion
     df = pd.read_csv(DIR_DATA / filename, index_col=0)
-
+    
+    # Get data types and create column definitions
     cols = ",".join(list(df.columns))
-    insert_stmt = f"INSERT INTO stage.{pg_table} ({cols}) VALUES %s"
-
-    conn = psycopg2.connect(
+    col_definition = []
+    for col, dtype in df.dtypes.items():
+        if "int" in str(dtype):
+            pg_type = "INTEGER"
+        elif "float" in str(dtype):
+            pg_type = "DOUBLE PRECISION"
+        elif "bool" in str(dtype):
+            pg_type = "BOOLEAN"
+        elif "datetime" in str(dtype):
+            pg_type = "TIMESTAMP"
+        else:
+            pg_type = "TEXT"
+        col_definition.append(f"{col} {pg_type}")
+    
+    
+    # Statements
+    stmt_create = (
+        f"""
+        CREATE TABLE IF NOT EXISTS stage.{pg_table} {', '.join(col_definition)}
+        """
+    )
+    stmt_insert = f"INSERT INTO stage.{pg_table} ({cols}) VALUES %s"
+    # Connect to Postgres using connection arguments
+    conn_pg = psycopg2.connect(
         host=conn_args.host,
         port=conn_args.port,
         user=conn_args.login,
         password=conn_args.password,
         dbname=conn_args.schema,
     )
-
-    try:
-        with conn, conn.cursor() as cur:
-            rows = list(df.itertuples(index=False, name=None))
-            psycopg2.extras.execute_values(cur, insert_stmt, rows)
-    finally:
-        conn.close()
+    cur = conn_pg.cursor()
+    rows = list(df.itertuples(index=False, name=None))
+    # Write data ro(
+    # w-by-r
+    # ow to the Postgres tablestmt_create = f"""CREATE TABLE IF NOT EXISTS stage.{pg_table}   {', '.join(col_definition)}
+        "
+    "")
+    psycopg2.extras.execute_values(cur, stmt_insert, rows)
+    conn.close()
 
 pg_conn_args = BaseHook.get_connection("pg_connection")
 
@@ -79,4 +103,4 @@ t_load_user_order_log = PythonOperator(
     dag=dag,
 )
 
-t_load_customer_research >> [t_load_user_activity_log, t_load_user_order_log]
+[t_load_customer_research, t_load_user_activity_log, t_load_user_order_log]

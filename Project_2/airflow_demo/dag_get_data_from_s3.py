@@ -6,7 +6,7 @@ import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-DIR_DATA = os.path.join(os.getcwd(), "data")
+DATA_DIR = Path.cwd() / "data"
 
 dag = DAG(
     dag_id="get_data_from_s3",
