@@ -6,6 +6,8 @@ import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
+DIR_DATA = os.path.join(os.getcwd(), "data")
+
 dag = DAG(
     dag_id="get_data_from_s3",
     schedule_interval="0 0 * * *",
@@ -16,7 +18,7 @@ dag = DAG(
 
 def download_from_s3(file_names):
     base_url = "https://storage.yandexcloud.net/s3-sprint3-static/lessons/"
-    out_dir = os.path.join(os.getcwd(), "data")
+    out_dir = DIR_DATA
     os.makedirs(out_dir, exist_ok=True)
 
     saved_paths = []
