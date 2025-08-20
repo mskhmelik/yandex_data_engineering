@@ -41,8 +41,7 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
         else:
             pg_type = "TEXT"
         col_definition.append(f"{col} {pg_type}")
-    
-    
+
     # Statements
     stmt_create = (
         f"""
@@ -50,6 +49,7 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
         """
     )
     stmt_insert = f"INSERT INTO stage.{pg_table} ({cols}) VALUES %s"
+    
     # Connect to Postgres using connection arguments
     conn_pg = psycopg2.connect(
         host=conn_args.host,
@@ -59,12 +59,9 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
         dbname=conn_args.schema,
     )
     cur = conn_pg.cursor()
+    
+    # Write data row-by-row to Postgres
     rows = list(df.itertuples(index=False, name=None))
-    # Write data ro(
-    # w-by-r
-    # ow to the Postgres tablestmt_create = f"""CREATE TABLE IF NOT EXISTS stage.{pg_table}   {', '.join(col_definition)}
-        "
-    "")
     psycopg2.extras.execute_values(cur, stmt_insert, rows)
     conn.close()
 
