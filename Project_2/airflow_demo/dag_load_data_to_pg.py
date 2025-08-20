@@ -26,29 +26,27 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     # Read the CSV file into a DataFrame and prepare for insertion
     df = pd.read_csv(DIR_DATA / filename, index_col=0)
     
-    # Get data types and create column definitions
-    cols = ",".join(list(df.columns))
-    col_definition = []
-    for col, dtype in df.dtypes.items():
-        if "int" in str(dtype):
-            pg_type = "INTEGER"
-        elif "float" in str(dtype):
-            pg_type = "DOUBLE PRECISION"
-        elif "bool" in str(dtype):
-            pg_type = "BOOLEAN"
-        elif "datetime" in str(dtype):
-            pg_type = "TIMESTAMP"
-        else:
-            pg_type = "TEXT"
-        col_definition.append(f"{col} {pg_type}")
+    # Map pandas dtypes to Postgres
+    def to_pg_type(dtype) -> str:
+        s = str(dtype)
+        if "int" in s:
+            return "INTEGER"
+        if "float" in s:
+            return "DOUBLE PRECISION"
+        if "bool" in s:
+            return "BOOLEAN"
+        if "datetime" in s or "date" in s:
+            return "TIMESTAMP"
+        return "TEXT"
 
-    # Statements
-    stmt_create = (
-        f"""
-        CREATE TABLE IF NOT EXISTS stage.{pg_table} {', '.join(col_definition)}
-        """
-    )
-    stmt_insert = f"INSERT INTO stage.{pg_table} ({cols}) VALUES %s"
+    col_defs = ", ".join(f"{col} {to_pg_type(dt)}" for col, dt in df.dtypes.items())
+    cols_csv = ", ".join(df.columns)
+
+    stmt_create_schema = "CREATE SCHEMA IF NOT EXISTS stage"
+    stmt_create_table = f"CREATE TABLE IF NOT EXISTS stage.{pg_table} ({col_defs})"
+    stmt_insert = f"INSERT INTO stage.{pg_table} ({cols_csv}) VALUES %s"
+
+    rows = list(df.itertuples(index=False, name=None))
     
     # Connect to Postgres using connection arguments
     conn_pg = psycopg2.connect(
