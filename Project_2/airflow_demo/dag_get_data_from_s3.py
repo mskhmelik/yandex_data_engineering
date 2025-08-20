@@ -1,21 +1,27 @@
+import datetime
+import os
+
+import pandas as pd
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-import datetime
-import pandas as pd
-import os
-
 dag = DAG(
-    dag_id='get_data_from_s3',
-    schedule_interval='0 0 * * *',
+    dag_id="get_data_from_s3",
+    schedule_interval="0 0 * * *",
     start_date=datetime.datetime(2021, 1, 1),
     catchup=False,
     dagrun_timeout=datetime.timedelta(minutes=60),
 )
 
 def download_from_s3(file_names):
-    base_url = 'https://storage.yandexcloud.net/s3-sprint3-static/lessons/'
-    out_dir = '/lessons/5. Реализация ETL в Airflow/4. Extract как подключиться к хранилищу, чтобы получить файл/Задание 2/'
+    base_url = (
+        "https://storage.yandexcloud.net/s3-sprint3-static/lessons/"
+    )
+    out_dir = (
+        "X:\\2_Documents\\OneDrive\\3_Education\\3_Python\\3_Data_engineering\\"
+        "Projects\\Project_2\\airflow_demo\\data"
+    )
     os.makedirs(out_dir, exist_ok=True)
 
     saved_paths = []
@@ -28,12 +34,12 @@ def download_from_s3(file_names):
     return saved_paths
 
 t_download_from_s3 = PythonOperator(
-    task_id='download_from_s3',
+    task_id="download_from_s3",
     python_callable=download_from_s3,
-    op_kwargs={'file_names': [
-        'customer_research.csv',
-        'user_activity_log.csv',
-        'user_order_log.csv'
+    op_kwargs={"file_names": [
+        "customer_research.csv",
+        "user_activity_log.csv",
+        "user_order_log.csv"
     ]},
     dag=dag
 )
