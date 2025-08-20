@@ -9,6 +9,8 @@ from airflow import DAG
 from airflow.hooks.base import BaseHook
 from airflow.operators.python import PythonOperator
 
+DIR_DATA = os.path.join(os.getcwd(), "data")
+
 dag = DAG(
     dag_id="transform_data",
     schedule_interval="0 0 * * *",
@@ -22,7 +24,7 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     Load a CSV file into Postgres stage schema.
     """
     
-    df = pd.read_csv(Path.cwd() / "data" / filename, index_col=0)
+    df = pd.read_csv(DIR_DATA / filename, index_col=0)
 
     cols = ",".join(list(df.columns))
     insert_stmt = f"INSERT INTO stage.{pg_table} ({cols}) VALUES %s"
