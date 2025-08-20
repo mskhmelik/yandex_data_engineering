@@ -9,7 +9,7 @@ from airflow import DAG
 from airflow.hooks.base import BaseHook
 from airflow.operators.python import PythonOperator
 
-DATA_DIR = Path.cwd() / "data"
+DIR_DATA = Path.cwd() / "data"
 
 dag = DAG(
     dag_id="transform_data",
@@ -49,19 +49,13 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     rows = list(df.itertuples(index=False, name=None))
     
     # Connect to Postgres using connection arguments
-    conn_pg = psycopg2.connect(
-        host=conn_args.host,
-        port=conn_args.port,
-        user=conn_args.login,
-        password=conn_args.password,
-        dbname=conn_args.schema,
-    )
-    cur = conn_pg.cursor()
-    
-    # Write data row-by-row to Postgres
-    rows = list(df.itertuples(index=False, name=None))
-    psycopg2.extras.execute_values(cur, stmt_insert, rows)
-    conn.close()
+    with psycopg2.connect(**conn_params) as conn:
+        with conn.cursor() as cur:
+            cur.execute(stmt_create_schema)
+            cur.execute(stmt_create_table)
+            if rows:
+                execute_values(cur, stmt_insert, rows)
+        conn.commit()
 
 pg_conn_args = BaseHook.get_connection("pg_connection")
 
