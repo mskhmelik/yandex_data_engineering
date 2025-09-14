@@ -13,26 +13,27 @@ dag = DAG(
     dagrun_timeout=datetime.timedelta(minutes=60),
 )
 
-# Reuse the Airflow connection object
+# Airflow connection (reuse in both tasks)
 pg_conn_args = BaseHook.get_connection("pg_connection")
 
-def update_mart_d_tables():
+def update_mart_d_tables(**kwargs):
     """
     Full refresh of mart dimensions with FK-safe order.
 
     Steps:
-        1. Open Postgres connection (Airflow 'pg_connection').
+        1. Connect to Postgres via Airflow 'pg_connection'.
         2. DELETE facts (f_activity, f_daily_sales) to release FK refs. Commit.
         3. DELETE + INSERT d_calendar. Commit.
         4. DELETE + INSERT d_customer. Commit.
         5. DELETE + INSERT d_item. Commit.
-        6. Close cursor and connection.
     """
+    # -- Clear facts first (FK-safe) -----------------------------------------
     sql_clear_facts = """
     DELETE FROM mart.f_activity;
     DELETE FROM mart.f_daily_sales;
     """
 
+    # -- d_calendar -----------------------------------------------------------
     sql_d_calendar = """
     DELETE FROM mart.d_calendar;
 
@@ -78,6 +79,7 @@ def update_mart_d_tables():
     ORDER BY fact_date;
     """
 
+    # -- d_customer -----------------------------------------------------------
     sql_d_customer = """
     DELETE FROM mart.d_customer;
 
@@ -100,6 +102,7 @@ def update_mart_d_tables():
     ORDER BY customer_id;
     """
 
+    # -- d_item ---------------------------------------------------------------
     sql_d_item = """
     DELETE FROM mart.d_item;
 
@@ -122,41 +125,32 @@ def update_mart_d_tables():
     ORDER BY item_id;
     """
 
-    # Connect and execute (same style as before)
+    # Connect and execute (your style)
     with psycopg2.connect(
         host=pg_conn_args.host,
         port=pg_conn_args.port,
         user=pg_conn_args.login,
         password=pg_conn_args.password,
-        dbname=pg_conn_args.schema,   # Airflow's 'schema' is the DB name
+        dbname=pg_conn_args.schema,   # Airflow's "schema" is the DB name
     ) as conn:
         with conn.cursor() as cur:
-            # 1) clear facts first (FK-safe)
-            cur.execute(sql_clear_facts)
-            conn.commit()
-
-            # 2) rebuild dims
-            cur.execute(sql_d_calendar)
-            conn.commit()
-
-            cur.execute(sql_d_customer)
-            conn.commit()
-
-            cur.execute(sql_d_item)
-            conn.commit()
+            cur.execute(sql_clear_facts); conn.commit()
+            cur.execute(sql_d_calendar);  conn.commit()
+            cur.execute(sql_d_customer);  conn.commit()
+            cur.execute(sql_d_item);      conn.commit()
 
     return 200
 
-def update_mart_f_tables():
+def update_mart_f_tables(**kwargs):
     """
-    Run full refresh of mart fact tables: f_activity, f_daily_sales.
+    Full refresh of mart facts.
 
     Steps:
-        1. Open Postgres connection (Airflow 'pg_connection').
-        2. Execute DELETE+INSERT for f_activity. Commit.
-        3. Execute DELETE+INSERT for f_daily_sales. Commit.
-        4. Close cursor and connection.
+        1. Connect to Postgres via Airflow 'pg_connection'.
+        2. DELETE + INSERT f_activity. Commit.
+        3. DELETE + INSERT f_daily_sales. Commit.
     """
+    # -- f_activity -----------------------------------------------------------
     sql_f_activity = """
     DELETE FROM mart.f_activity;
 
@@ -186,6 +180,7 @@ def update_mart_f_tables():
     ORDER BY activity_id, date_id;
     """
 
+    # -- f_daily_sales --------------------------------------------------------
     sql_f_daily_sales = """
     DELETE FROM mart.f_daily_sales;
 
@@ -231,31 +226,28 @@ def update_mart_f_tables():
     ORDER BY date_id, item_id, customer_id;
     """
 
-    # Connect and execute (same style as before)
+    # Connect and execute (your style)
     with psycopg2.connect(
         host=pg_conn_args.host,
         port=pg_conn_args.port,
         user=pg_conn_args.login,
         password=pg_conn_args.password,
-        dbname=pg_conn_args.schema,   # Airflow's 'schema' is the DB name
+        dbname=pg_conn_args.schema,   # Airflow's "schema" is the DB name
     ) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql_f_activity)
-            conn.commit()
-            cur.execute(sql_f_daily_sales)
-            conn.commit()
+            cur.execute(sql_f_activity);    conn.commit()
+            cur.execute(sql_f_daily_sales); conn.commit()
 
     return 200
 
-
 t_update_mart_d_tables = PythonOperator(
-    task_id='update_mart_d_tables',
+    task_id="update_mart_d_tables",
     python_callable=update_mart_d_tables,
     dag=dag,
 )
 
 t_update_mart_f_tables = PythonOperator(
-    task_id='update_mart_f_tables',
+    task_id="update_mart_f_tables",
     python_callable=update_mart_f_tables,
     dag=dag,
 )
