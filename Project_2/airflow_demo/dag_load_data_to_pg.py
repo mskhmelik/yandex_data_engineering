@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pandas as pd
 import psycopg2
-import psycopg2.extras
 from psycopg2.extras import execute_values
 
 from airflow import DAG
@@ -20,12 +19,12 @@ dag = DAG(
     dagrun_timeout=timedelta(minutes=60),
 )
 
-def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
+def load_file_to_pg(filename: str, pg_table: str, date_cols: list[str], conn_args) -> None:
     """
     Load one CSV from DIR_DATA into Postgres as stage.<pg_table>.
 
     Steps:
-        1. Read the CSV with pandas (uses index_col=0, so the first CSV column is dropped).
+        1. Read the CSV with pandas, parsing the specified columns as datetime.
         2. Infer Postgres column types from pandas dtypes via to_pg_type.
         3. Ensure schema "stage" exists; create the table if it does not.
         4. Bulk-insert all rows with psycopg2.extras.execute_values.
@@ -34,7 +33,8 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     Args:
         1. filename: CSV file name under DIR_DATA, e.g. "customer_research.csv".
         2. pg_table: Target table name without schema, e.g. "customer_research".
-        3. conn_args: Airflow Connection object; uses host, port, login, password, schema (database name).
+        3. date_cols: List of column names to explicitly parse as datetime.
+        4. conn_args: Airflow Connection object; uses host, port, login, password, schema (database name).
 
     Returns:
         1. None
@@ -42,11 +42,13 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     Raises:
         1. FileNotFoundError if the CSV is missing.
         2. psycopg2.Error for database connection or SQL issues.
-
-    Notes:
-        1. Remove index_col=0 if you do not want to drop the first CSV column.
     """
-    df = pd.read_csv(DIR_DATA / filename, index_col=0)
+    csv_path = DIR_DATA / filename
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
+
+    # Read CSV and parse date columns
+    df = pd.read_csv(csv_path, parse_dates=date_cols)
 
     def to_pg_type(dtype) -> str:
         """
@@ -62,9 +64,6 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
         - BOOLEAN for bool dtypes.
         - TIMESTAMP for datetime/date dtypes.
         - TEXT for everything else (including object).
-
-        Notes:
-        1. This is a simple mapping; adjust if you need DECIMAL, VARCHAR(n), or TIME/DATE.
         """
         s = str(dtype)
         if "int" in s: return "INTEGER"
@@ -73,6 +72,7 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
         if "datetime" in s or "date" in s: return "TIMESTAMP"
         return "TEXT"
 
+    # Build CREATE TABLE statement dynamically
     col_defs = ", ".join(f"{col} {to_pg_type(dt)}" for col, dt in df.dtypes.items())
     cols_csv = ", ".join(df.columns)
 
@@ -80,9 +80,11 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
     stmt_create_table = f"CREATE TABLE IF NOT EXISTS stage.{pg_table} ({col_defs})"
     stmt_insert = f"INSERT INTO stage.{pg_table} ({cols_csv}) VALUES %s"
 
-    rows = list(df.itertuples(index=False, name=None))
+    # Replace NaN/NaT with None so psycopg2 inserts NULL
+    df_for_insert = df.where(pd.notnull(df), None)
+    rows = list(df_for_insert.itertuples(index=False, name=None))
 
-    # pass Connection fields explicitly (no **)
+    # Connect and execute
     with psycopg2.connect(
         host=conn_args.host,
         port=conn_args.port,
@@ -96,6 +98,7 @@ def load_file_to_pg(filename: str, pg_table: str, conn_args) -> None:
             if rows:
                 execute_values(cur, stmt_insert, rows)
         conn.commit()
+        print(f"Inserted {len(rows)} rows into stage.{pg_table}")
 
 pg_conn_args = BaseHook.get_connection("pg_connection")
 
@@ -105,6 +108,7 @@ t_load_customer_research = PythonOperator(
     op_kwargs={
         "filename": "customer_research.csv",
         "pg_table": "customer_research",
+        "date_cols": ["date_id"],   # parse this column as datetime
         "conn_args": pg_conn_args,
     },
     dag=dag,
@@ -116,6 +120,7 @@ t_load_user_activity_log = PythonOperator(
     op_kwargs={
         "filename": "user_activity_log.csv",
         "pg_table": "user_activity_log",
+        "date_cols": ["date_time"],  # parse this column as datetime
         "conn_args": pg_conn_args,
     },
     dag=dag,
@@ -127,6 +132,7 @@ t_load_user_order_log = PythonOperator(
     op_kwargs={
         "filename": "user_order_log.csv",
         "pg_table": "user_order_log",
+        "date_cols": ["date_time"],  # parse this column as datetime
         "conn_args": pg_conn_args,
     },
     dag=dag,
