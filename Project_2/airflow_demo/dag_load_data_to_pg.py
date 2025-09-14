@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
+from typing import List
 
 from airflow import DAG
 from airflow.hooks.base import BaseHook
@@ -19,7 +20,7 @@ dag = DAG(
     dagrun_timeout=timedelta(minutes=60),
 )
 
-def load_file_to_pg(filename: str, pg_table: str, date_cols: list[str], conn_args) -> None:
+def load_file_to_pg(filename: str, pg_table: str, date_cols: List[str], conn_args) -> None:
     """
     Load one CSV from DIR_DATA into Postgres as stage.<pg_table>.
 
