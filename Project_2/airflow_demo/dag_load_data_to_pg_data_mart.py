@@ -27,10 +27,12 @@ def execute_sql(sql, engine):
         for stmt in statements:
             conn.execute(text(stmt))
 
+
 SQL_CLEAR_FACTS = """
 DELETE FROM mart.f_activity;
 DELETE FROM mart.f_daily_sales;
 """
+
 SQL_D_CALENDAR = """
 DELETE FROM mart.d_calendar;
 WITH
@@ -74,6 +76,7 @@ SELECT date_id, fact_date, day_num, month_num, month_name, year_num
 FROM calendar_enriched
 ORDER BY fact_date;
 """
+
 SQL_D_CUSTOMER = """
 DELETE FROM mart.d_customer;
 WITH
@@ -92,6 +95,7 @@ SELECT customer_id, city_id
 FROM customer_city
 ORDER BY customer_id;
 """
+
 SQL_D_ITEM = """
 DELETE FROM mart.d_item;
 WITH
@@ -108,6 +112,7 @@ SELECT item_id, item_name
 FROM dedup_items
 ORDER BY item_id;
 """
+
 SQL_F_ACTIVITY = """
 DELETE FROM mart.f_activity;
 WITH
@@ -131,6 +136,7 @@ SELECT activity_id, date_id, click_number
 FROM activity_agg
 ORDER BY activity_id, date_id;
 """
+
 SQL_F_DAILY_SALES = """
 DELETE FROM mart.f_daily_sales;
 WITH
