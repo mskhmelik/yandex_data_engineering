@@ -1,5 +1,4 @@
--- Insert new customers into mart.d_customer (simple, readable)
-
+-- Rerun mart.d_customer
 INSERT INTO mart.d_customer (customer_id, first_name, last_name, city_id)
 SELECT
     u.customer_id,

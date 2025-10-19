@@ -1,4 +1,4 @@
--- Insert new items into mart.d_item
+-- Rerun mart.d_item
 INSERT INTO mart.d_item (item_id, item_name)
 SELECT
     u.item_id,
