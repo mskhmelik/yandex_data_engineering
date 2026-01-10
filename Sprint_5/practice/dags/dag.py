@@ -1,15 +1,126 @@
+import json
 import logging
-import pendulum
+from datetime import datetime
 
+import pendulum
 from airflow.decorators import dag, task
 from airflow.models.variable import Variable
 
+from examples.stg import EtlSetting, StgEtlSettingsRepository
 from lib import ConnectionBuilder, MongoConnect
 
 log = logging.getLogger(__name__)
 
-WF_KEY = "ordersystem_users"
-WF_TS_KEY = "last_update_ts"
+
+class UserReader:
+    def __init__(self, mongo_connect: MongoConnect):
+        self._mongo = mongo_connect
+
+    def _get_collection(self):
+        # preferred path if the course lib provides it
+        if hasattr(self._mongo, "get_collection"):
+            return self._mongo.get_collection("users")
+
+        # fallback: MongoConnect has .client but it might be a METHOD
+        client = getattr(self._mongo, "client", None)
+        if client is None:
+            raise RuntimeError("MongoConnect has no get_collection() and no .client")
+
+        if callable(client):
+            client = client()  # ✅ this fixes your error
+
+        # db name might also be a method/attr depending on lib
+        db_name = getattr(self._mongo, "db", None) or getattr(self._mongo, "database", None)
+        if callable(db_name):
+            db_name = db_name()
+
+        if not db_name:
+            db_name = Variable.get("MONGO_DB_DATABASE_NAME")
+
+        return client[db_name]["users"]
+
+
+    def get_users(self, last_loaded_ts: datetime, limit: int):
+        col = self._get_collection()
+
+        # Mongo query: update_ts > watermark
+        cursor = (
+            col.find({"update_ts": {"$gt": last_loaded_ts}})
+            .sort("update_ts", 1)
+            .limit(limit)
+        )
+        return list(cursor)
+
+
+class PgSaverUsers:
+    def save_object(self, conn, object_id: str, update_ts: datetime, doc: dict) -> None:
+        # store full doc as json string
+        payload = json.dumps(doc, default=str, ensure_ascii=False)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO stg.ordersystem_users (object_id, object_value, update_ts)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (object_id) DO UPDATE
+                SET
+                    object_value = EXCLUDED.object_value,
+                    update_ts = EXCLUDED.update_ts;
+                """,
+                (object_id, payload, update_ts),
+            )
+
+
+class UserLoader:
+    _LOG_THRESHOLD = 100
+    _SESSION_LIMIT = 1000
+
+    WF_KEY = "ordersystem_users_origin_to_stg_workflow"
+    LAST_LOADED_TS_KEY = "last_loaded_ts"
+
+    def __init__(self, reader: UserReader, pg_dest, pg_saver: PgSaverUsers, logger: logging.Logger) -> None:
+        self.reader = reader
+        self.pg_dest = pg_dest
+        self.pg_saver = pg_saver
+        self.settings_repository = StgEtlSettingsRepository()
+        self.log = logger
+
+    def run_copy(self) -> int:
+        with self.pg_dest.connection() as conn:
+            # 1) read settings
+            wf_setting = self.settings_repository.get_setting(conn, self.WF_KEY)
+            if not wf_setting:
+                wf_setting = EtlSetting(
+                    id=0,
+                    workflow_key=self.WF_KEY,
+                    workflow_settings={self.LAST_LOADED_TS_KEY: datetime(2022, 1, 1).isoformat()},
+                )
+
+            last_loaded_ts = datetime.fromisoformat(wf_setting.workflow_settings[self.LAST_LOADED_TS_KEY])
+            self.log.info("users load starting from checkpoint: %s", last_loaded_ts)
+
+            # 2) read from mongo
+            load_queue = self.reader.get_users(last_loaded_ts, self._SESSION_LIMIT)
+            self.log.info("Found %s documents to sync from users collection.", len(load_queue))
+            if not load_queue:
+                self.log.info("No new users. Quit.")
+                return 0
+
+            # 3) save rows into stg.ordersystem_users (in this transaction)
+            i = 0
+            for d in load_queue:
+                self.pg_saver.save_object(conn, str(d["_id"]), d["update_ts"], d)
+                i += 1
+                if i % self._LOG_THRESHOLD == 0:
+                    self.log.info("processed %s users of %s", i, len(load_queue))
+
+            # 4) update watermark (also in this transaction)
+            new_last_ts = max([t["update_ts"] for t in load_queue]).isoformat()
+            wf_setting.workflow_settings[self.LAST_LOADED_TS_KEY] = new_last_ts
+            self.settings_repository.save_setting(conn, wf_setting.workflow_key, json.dumps(wf_setting.workflow_settings))
+
+            self.log.info("users load finished. new checkpoint: %s", new_last_ts)
+            return len(load_queue)
 
 
 @dag(
@@ -17,12 +128,12 @@ WF_TS_KEY = "last_update_ts"
     start_date=pendulum.datetime(2022, 5, 5, tz="UTC"),
     catchup=False,
     tags=["sprint5", "stg", "origin"],
-    is_paused_upon_creation=False,
+    is_paused_upon_creation=True,
 )
 def sprint5_stg_order_system_users():
+
     dwh_pg_connect = ConnectionBuilder.pg_conn("PG_WAREHOUSE_CONNECTION")
 
-    # Mongo variables
     cert_path = Variable.get("MONGO_DB_CERTIFICATE_PATH")
     db_user = Variable.get("MONGO_DB_USER")
     db_pw = Variable.get("MONGO_DB_PASSWORD")
@@ -31,93 +142,16 @@ def sprint5_stg_order_system_users():
     host = Variable.get("MONGO_DB_HOST")
 
     @task()
-    def load_users():
+    def users_load():
+        pg_saver = PgSaverUsers()
+
         mongo_connect = MongoConnect(cert_path, db_user, db_pw, host, rs, db, db)
+        reader = UserReader(mongo_connect)
 
-        with dwh_pg_connect.connection() as conn:
-            conn.autocommit = False
-            try:
-                with conn.cursor() as cur:
-                    # create wf settings if missing (safe)
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS stg.srv_wf_settings (
-                            id serial PRIMARY KEY,
-                            workflow_key varchar NOT NULL UNIQUE,
-                            workflow_settings jsonb NOT NULL
-                        );
-                    """)
+        loader = UserLoader(reader, dwh_pg_connect, pg_saver, log)
+        loader.run_copy()
 
-                    # 1) read last watermark
-                    cur.execute(
-                        """
-                        SELECT workflow_settings->>%s
-                        FROM stg.srv_wf_settings
-                        WHERE workflow_key = %s;
-                        """,
-                        (WF_TS_KEY, WF_KEY),
-                    )
-                    row = cur.fetchone()
-                    last_ts = row[0] if row and row[0] is not None else None
-
-                # 2) read users from Mongo incrementally
-                # update_ts exists in each document
-                # if first run -> read all
-                query = {}
-                if last_ts:
-                    query = {"update_ts": {"$gt": last_ts}}
-
-                users = list(mongo_connect.client()[db]["users"].find(query))
-                if not users:
-                    conn.commit()
-                    log.info("No new users. last_ts=%s", last_ts)
-                    return
-
-                # 3) write to stg.ordersystem_users
-                # table structure: (id serial pk, object_id varchar, object_value text, update_ts timestamp)
-                rows = []
-                max_ts = last_ts
-                for doc in users:
-                    object_id = str(doc.get("_id"))
-                    update_ts = doc.get("update_ts")
-
-                    # keep full document as string
-                    object_value = str(doc)
-
-                    rows.append((object_id, object_value, update_ts))
-
-                    if max_ts is None or (update_ts and str(update_ts) > str(max_ts)):
-                        max_ts = update_ts
-
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        """
-                        INSERT INTO stg.ordersystem_users (object_id, object_value, update_ts)
-                        VALUES (%s, %s, %s);
-                        """,
-                        rows,
-                    )
-
-                    # 4) save watermark (same transaction)
-                    cur.execute(
-                        """
-                        INSERT INTO stg.srv_wf_settings (workflow_key, workflow_settings)
-                        VALUES (%s, jsonb_build_object(%s, %s::text))
-                        ON CONFLICT (workflow_key) DO UPDATE
-                        SET workflow_settings =
-                            stg.srv_wf_settings.workflow_settings ||
-                            jsonb_build_object(%s, %s::text);
-                        """,
-                        (WF_KEY, WF_TS_KEY, str(max_ts), WF_TS_KEY, str(max_ts)),
-                    )
-
-                conn.commit()
-                log.info("Loaded %s users into stg.ordersystem_users. new_last_ts=%s", len(rows), max_ts)
-
-            except Exception:
-                conn.rollback()
-                raise
-
-    load_users()
+    users_load()  # one task
 
 
-users_stg_dag = sprint5_stg_order_system_users()
+order_users_stg_dag = sprint5_stg_order_system_users()
