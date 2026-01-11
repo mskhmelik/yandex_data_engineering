@@ -1,134 +1,137 @@
-from datetime import datetime
-from typing import Dict, List
-
-from lib import MongoConnect
-
-
-class UserReader:
-    def __init__(self, mc: MongoConnect) -> None:
-        self.dbs = mc.client()
-
-    def get_users(self, load_threshold: datetime, limit: int) -> List[Dict]:
-        filter_ = {"update_ts": {"$gt": load_threshold}}
-        sort = [("update_ts", 1)]
-        docs = list(
-            self.dbs.get_collection("users").find(filter=filter_, sort=sort, limit=limit)
-        )
-        return docs
-    
-
-from datetime import datetime
-from typing import Any
-
-from lib.dict_util import json2str
-from psycopg import Connection
-
-
-class PgSaverUsers:
-    def save_object(self, conn: Connection, id: str, update_ts: datetime, val: Any):
-        str_val = json2str(val)
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                    INSERT INTO stg.ordersystem_users(object_id, object_value, update_ts)
-                    VALUES (%(id)s, %(val)s, %(update_ts)s)
-                    ON CONFLICT (object_id) DO UPDATE
-                    SET
-                        object_value = EXCLUDED.object_value,
-                        update_ts = EXCLUDED.update_ts;
-                """,
-                {"id": id, "val": str_val, "update_ts": update_ts},
-            )
-
-
-from datetime import datetime
-from logging import Logger
-
-from examples.stg import EtlSetting, StgEtlSettingsRepository
-from lib import PgConnect
-from lib.dict_util import json2str
-
-from examples.stg.order_system_users_dag.user_reader import UserReader
-from examples.stg.order_system_users_dag.pg_saver import PgSaverUsers
-
-
-class UserLoader:
-    _LOG_THRESHOLD = 2
-    _SESSION_LIMIT = 1000  # as your requirement (example said 1000)
-
-    WF_KEY = "ordersystem_users_origin_to_stg_workflow"
-    LAST_LOADED_TS_KEY = "last_loaded_ts"
-
-    def __init__(self, collection_loader: UserReader, pg_dest: PgConnect, pg_saver: PgSaverUsers, logger: Logger) -> None:
-        self.collection_loader = collection_loader
-        self.pg_saver = pg_saver
-        self.pg_dest = pg_dest
-        self.settings_repository = StgEtlSettingsRepository()
-        self.log = logger
-
-    def run_copy(self) -> int:
-        with self.pg_dest.connection() as conn:
-            wf_setting = self.settings_repository.get_setting(conn, self.WF_KEY)
-            if not wf_setting:
-                wf_setting = EtlSetting(
-                    id=0,
-                    workflow_key=self.WF_KEY,
-                    workflow_settings={self.LAST_LOADED_TS_KEY: datetime(2022, 1, 1).isoformat()},
-                )
-
-            last_loaded_ts = datetime.fromisoformat(wf_setting.workflow_settings[self.LAST_LOADED_TS_KEY])
-            self.log.info(f"starting to load from last checkpoint: {last_loaded_ts}")
-
-            load_queue = self.collection_loader.get_users(last_loaded_ts, self._SESSION_LIMIT)
-            self.log.info(f"Found {len(load_queue)} documents to sync from users collection.")
-            if not load_queue:
-                self.log.info("Quitting.")
-                return 0
-
-            i = 0
-            for d in load_queue:
-                self.pg_saver.save_object(conn, str(d["_id"]), d["update_ts"], d)
-                i += 1
-                if i % self._LOG_THRESHOLD == 0:
-                    self.log.info(f"processed {i} documents of {len(load_queue)} while syncing users.")
-
-            wf_setting.workflow_settings[self.LAST_LOADED_TS_KEY] = max([t["update_ts"] for t in load_queue]).isoformat()
-            wf_setting_json = json2str(wf_setting.workflow_settings)
-            self.settings_repository.save_setting(conn, wf_setting.workflow_key, wf_setting_json)
-
-            self.log.info(f"Finishing work. Last checkpoint: {wf_setting_json}")
-            return len(load_queue)
-
+import json
 import logging
-import pendulum
+from datetime import datetime
 
+import pendulum
 from airflow.decorators import dag, task
 from airflow.models.variable import Variable
-
-from examples.stg.order_system_restaurants_dag.pg_saver import PgSaver
-from examples.stg.order_system_restaurants_dag.restaurant_loader import RestaurantLoader
-from examples.stg.order_system_restaurants_dag.restaurant_reader import RestaurantReader
-
-from examples.stg.order_system_users_dag.pg_saver import PgSaverUsers
-from examples.stg.order_system_users_dag.user_loader import UserLoader
-from examples.stg.order_system_users_dag.user_reader import UserReader
 
 from lib import ConnectionBuilder, MongoConnect
 
 log = logging.getLogger(__name__)
+
+DWH_CONN_ID = "PG_WAREHOUSE_CONNECTION"
+
+SESSION_LIMIT = 1000
+
+WF_SETTINGS_TABLE_DDL = """
+CREATE SCHEMA IF NOT EXISTS stg;
+
+CREATE TABLE IF NOT EXISTS stg.srv_wf_settings (
+    workflow_key varchar PRIMARY KEY,
+    workflow_settings jsonb NOT NULL
+);
+"""
+
+
+def _json_dumps_safe(obj) -> str:
+    # Mongo docs can contain ObjectId, datetime, etc.
+    return json.dumps(obj, default=str, ensure_ascii=False)
+
+
+def _get_last_loaded_ts(conn, workflow_key: str) -> datetime:
+    with conn.cursor() as cur:
+        cur.execute(WF_SETTINGS_TABLE_DDL)
+        cur.execute(
+            """
+            SELECT (workflow_settings->>'last_loaded_ts') AS last_loaded_ts
+            FROM stg.srv_wf_settings
+            WHERE workflow_key = %(wk)s;
+            """,
+            {"wk": workflow_key},
+        )
+        row = cur.fetchone()
+
+    if not row or not row[0]:
+        return datetime(2022, 1, 1)
+
+    return datetime.fromisoformat(row[0])
+
+
+def _save_last_loaded_ts(conn, workflow_key: str, last_loaded_ts: datetime) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO stg.srv_wf_settings(workflow_key, workflow_settings)
+            VALUES (%(wk)s, jsonb_build_object('last_loaded_ts', (%(ts)s)::text))
+            ON CONFLICT (workflow_key) DO UPDATE
+            SET workflow_settings = EXCLUDED.workflow_settings;
+            """,
+            {"wk": workflow_key, "ts": last_loaded_ts.isoformat()},
+        )
+
+
+def _fetch_mongo_docs(mongo_db, collection_name: str, last_loaded_ts: datetime, limit: int):
+    filter_ = {"update_ts": {"$gt": last_loaded_ts}}
+    sort_ = [("update_ts", 1)]
+    return list(mongo_db.get_collection(collection_name).find(filter=filter_, sort=sort_, limit=limit))
+
+
+def _upsert_docs(conn, target_table: str, docs) -> None:
+    # target_table must be one of:
+    # stg.ordersystem_restaurants / stg.ordersystem_users / stg.ordersystem_orders
+    sql = f"""
+        INSERT INTO {target_table}(object_id, object_value, update_ts)
+        VALUES (%(object_id)s, %(object_value)s, %(update_ts)s)
+        ON CONFLICT (object_id) DO UPDATE
+        SET
+            object_value = EXCLUDED.object_value,
+            update_ts = EXCLUDED.update_ts;
+    """
+
+    with conn.cursor() as cur:
+        for d in docs:
+            cur.execute(
+                sql,
+                {
+                    "object_id": str(d["_id"]),
+                    "object_value": _json_dumps_safe(d),
+                    "update_ts": d["update_ts"],
+                },
+            )
+
+
+def _load_collection(
+    dwh_pg_connect,
+    mongo_db,
+    collection_name: str,
+    target_table: str,
+    workflow_key: str,
+    limit: int,
+) -> int:
+    with dwh_pg_connect.connection() as conn:
+        last_ts = _get_last_loaded_ts(conn, workflow_key)
+        log.info("%s: last checkpoint = %s", collection_name, last_ts)
+
+        docs = _fetch_mongo_docs(mongo_db, collection_name, last_ts, limit)
+        log.info("%s: found %s docs", collection_name, len(docs))
+
+        if not docs:
+            return 0
+
+        # 3+4 in one transaction: upsert + save checkpoint
+        _upsert_docs(conn, target_table, docs)
+
+        new_last_ts = max(d["update_ts"] for d in docs)
+        _save_last_loaded_ts(conn, workflow_key, new_last_ts)
+
+        log.info("%s: saved new checkpoint = %s", collection_name, new_last_ts)
+        return len(docs)
 
 
 @dag(
     schedule_interval="0/15 * * * *",
     start_date=pendulum.datetime(2022, 5, 5, tz="UTC"),
     catchup=False,
-    tags=["sprint5", "stg", "origin"],
-    is_paused_upon_creation=True,
+    tags=["sprint5", "stg", "mongo"],
+    is_paused_upon_creation=False,
 )
-def sprint5_stg_order_system():
+def ordersystem_mongo_to_stg():
 
-    dwh_pg_connect = ConnectionBuilder.pg_conn("PG_WAREHOUSE_CONNECTION")
+    # DWH connection (Postgres)
+    dwh_pg_connect = ConnectionBuilder.pg_conn(DWH_CONN_ID)
 
+    # Mongo connection params from Airflow Variables
     cert_path = Variable.get("MONGO_DB_CERTIFICATE_PATH")
     db_user = Variable.get("MONGO_DB_USER")
     db_pw = Variable.get("MONGO_DB_PASSWORD")
@@ -136,26 +139,51 @@ def sprint5_stg_order_system():
     db = Variable.get("MONGO_DB_DATABASE_NAME")
     host = Variable.get("MONGO_DB_HOST")
 
+    def _mongo_db():
+        mongo_connect = MongoConnect(cert_path, db_user, db_pw, host, rs, db, db)
+        return mongo_connect.client()
+
     @task()
     def load_restaurants():
-        pg_saver = PgSaver()
-        mongo_connect = MongoConnect(cert_path, db_user, db_pw, host, rs, db, db)
-        collection_reader = RestaurantReader(mongo_connect)
-        loader = RestaurantLoader(collection_reader, dwh_pg_connect, pg_saver, log)
-        loader.run_copy()
+        mongo_db = _mongo_db()
+        return _load_collection(
+            dwh_pg_connect=dwh_pg_connect,
+            mongo_db=mongo_db,
+            collection_name="restaurants",
+            target_table="stg.ordersystem_restaurants",
+            workflow_key="ordersystem_restaurants_origin_to_stg_workflow",
+            limit=SESSION_LIMIT,
+        )
 
     @task()
     def load_users():
-        pg_saver = PgSaverUsers()
-        mongo_connect = MongoConnect(cert_path, db_user, db_pw, host, rs, db, db)
-        collection_reader = UserReader(mongo_connect)
-        loader = UserLoader(collection_reader, dwh_pg_connect, pg_saver, log)
-        loader.run_copy()
+        mongo_db = _mongo_db()
+        return _load_collection(
+            dwh_pg_connect=dwh_pg_connect,
+            mongo_db=mongo_db,
+            collection_name="users",
+            target_table="stg.ordersystem_users",
+            workflow_key="ordersystem_users_origin_to_stg_workflow",
+            limit=SESSION_LIMIT,
+        )
+
+    @task()
+    def load_orders():
+        mongo_db = _mongo_db()
+        return _load_collection(
+            dwh_pg_connect=dwh_pg_connect,
+            mongo_db=mongo_db,
+            collection_name="orders",
+            target_table="stg.ordersystem_orders",
+            workflow_key="ordersystem_orders_origin_to_stg_workflow",
+            limit=SESSION_LIMIT,
+        )
 
     r = load_restaurants()
     u = load_users()
+    o = load_orders()
 
-    r >> u
+    r >> u >> o
 
 
-order_stg_dag = sprint5_stg_order_system()  # noqa
+dag = ordersystem_mongo_to_stg()
