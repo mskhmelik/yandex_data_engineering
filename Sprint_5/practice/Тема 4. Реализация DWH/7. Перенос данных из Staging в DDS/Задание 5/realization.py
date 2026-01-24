@@ -1,3 +1,4 @@
+
 import logging
 import pendulum
 from airflow.decorators import dag, task
@@ -66,7 +67,10 @@ def dds_full_refresh():
                 cur.execute(
                     """
                     INSERT INTO dds.dm_restaurants (
-                        restaurant_id, restaurant_name, active_from, active_to
+                        restaurant_id,
+                        restaurant_name,
+                        active_from,
+                        active_to
                     )
                     SELECT
                         object_id,
@@ -115,7 +119,10 @@ def dds_full_refresh():
     def load_dm_products():
         with pg.connection() as conn:
             with conn.cursor() as cur:
+                log.info("Dropping dm_products")
                 cur.execute("DROP TABLE IF EXISTS dds.dm_products CASCADE;")
+
+                log.info("Creating dm_products")
                 cur.execute(
                     """
                     CREATE TABLE dds.dm_products (
@@ -130,11 +137,17 @@ def dds_full_refresh():
                     );
                     """
                 )
-                # dedupe per (restaurant, product_id): keep latest by update_ts
+
+                log.info("Inserting products parsed from orders")
                 cur.execute(
                     """
                     INSERT INTO dds.dm_products (
-                        restaurant_id, product_id, product_name, product_price, active_from, active_to
+                        restaurant_id,
+                        product_id,
+                        product_name,
+                        product_price,
+                        active_from,
+                        active_to
                     )
                     SELECT DISTINCT ON (r.id, (item.elem ->> 'id'))
                         r.id AS restaurant_id,
@@ -145,7 +158,7 @@ def dds_full_refresh():
                         %(active_to)s::timestamp AS active_to
                     FROM stg.ordersystem_orders o
                     JOIN dds.dm_restaurants r
-                      ON r.restaurant_id = (o.object_value::jsonb -> 'restaurant' ->> 'id')
+                    ON r.restaurant_id = (o.object_value::jsonb -> 'restaurant' ->> 'id')
                     CROSS JOIN LATERAL jsonb_array_elements(o.object_value::jsonb -> 'order_items') AS item(elem)
                     ORDER BY
                         r.id,
@@ -155,118 +168,15 @@ def dds_full_refresh():
                     {"active_to": ACTIVE_TO_FAR_FUTURE},
                 )
 
-    @task()
-    def load_dm_orders():
-        with pg.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS dds.dm_orders CASCADE;")
-                cur.execute(
-                    """
-                    CREATE TABLE dds.dm_orders (
-                        id serial PRIMARY KEY,
-                        order_key varchar NOT NULL,
-                        order_status varchar NOT NULL,
-                        restaurant_id integer NOT NULL,
-                        timestamp_id integer NOT NULL,
-                        user_id integer NOT NULL
-                    );
-                    """
-                )
 
-                cur.execute(
-                    """
-                    INSERT INTO dds.dm_orders (
-                        order_key, order_status, restaurant_id, timestamp_id, user_id
-                    )
-                    SELECT
-                        o.object_id AS order_key,
-                        (o.object_value::jsonb ->> 'final_status') AS order_status,
-                        r.id AS restaurant_id,
-                        ts.id AS timestamp_id,
-                        u.id AS user_id
-                    FROM stg.ordersystem_orders o
-                    JOIN dds.dm_restaurants r
-                      ON r.restaurant_id = (o.object_value::jsonb -> 'restaurant' ->> 'id')
-                    JOIN dds.dm_users u
-                      ON u.user_id = (o.object_value::jsonb -> 'user' ->> 'id')
-                    JOIN dds.dm_timestamps ts
-                      ON ts.ts = date_trunc('second', (o.object_value::jsonb ->> 'date')::timestamp)
-                    WHERE (o.object_value::jsonb ->> 'final_status') IN ('CLOSED', 'CANCELLED');
-                    """
-                )
-
-    @task()
-    def load_fct_product_sales():
-        with pg.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS dds.fct_product_sales CASCADE;")
-                cur.execute(
-                    """
-                    CREATE TABLE dds.fct_product_sales (
-                        id serial PRIMARY KEY,
-                        product_id integer NOT NULL,
-                        order_id integer NOT NULL,
-                        count integer DEFAULT 0 NOT NULL
-                            CONSTRAINT fct_product_sales_count_check CHECK (count >= 0),
-                        price numeric(19, 5) DEFAULT 0 NOT NULL
-                            CONSTRAINT fct_product_sales_price_check CHECK (price >= 0),
-                        total_sum numeric(19, 5) DEFAULT 0 NOT NULL
-                            CONSTRAINT fct_product_sales_total_sum_check CHECK (total_sum >= 0),
-                        bonus_payment numeric(19, 5) DEFAULT 0 NOT NULL
-                            CONSTRAINT fct_product_sales_bonus_payment_check CHECK (bonus_payment >= 0),
-                        bonus_grant numeric(19, 5) DEFAULT 0 NOT NULL
-                            CONSTRAINT fct_product_sales_bonus_grant_check CHECK (bonus_grant >= 0)
-                    );
-                    """
-                )
-
-                cur.execute(
-                    """
-                    INSERT INTO dds.fct_product_sales (
-                        product_id,
-                        order_id,
-                        count,
-                        price,
-                        total_sum,
-                        bonus_payment,
-                        bonus_grant
-                    )
-                    SELECT
-                        dp.id                       AS product_id,
-                        do2.id                      AS order_id,
-                        (item.elem ->> 'quantity')::int                     AS count,
-                        (item.elem ->> 'price')::numeric(19,5)              AS price,
-                        ((item.elem ->> 'quantity')::numeric(19,5)
-                         * (item.elem ->> 'price')::numeric(19,5))          AS total_sum,
-                        0::numeric(19,5)                                     AS bonus_payment,
-                        ((item.elem ->> 'quantity')::numeric(19,5)
-                         * (item.elem ->> 'price')::numeric(19,5)
-                         * 0.05)::numeric(19,5)                              AS bonus_grant
-                    FROM stg.ordersystem_orders o
-                    JOIN dds.dm_orders do2
-                      ON do2.order_key = o.object_id
-                    JOIN dds.dm_restaurants dr
-                      ON dr.restaurant_id = (o.object_value::jsonb -> 'restaurant' ->> 'id')
-                    CROSS JOIN LATERAL jsonb_array_elements(
-                        o.object_value::jsonb -> 'order_items'
-                    ) AS item(elem)
-                    JOIN dds.dm_products dp
-                      ON dp.restaurant_id = dr.id
-                     AND dp.product_id = (item.elem ->> 'id')
-                    WHERE (o.object_value::jsonb ->> 'final_status') IN ('CLOSED','CANCELLED');
-                    """
-                )
-
-        log.info("fct_product_sales full refresh completed")
+        log.info("dm_products full refresh completed")
 
     u = load_dm_users()
     r = load_dm_restaurants()
     t = load_dm_timestamps()
     p = load_dm_products()
-    o = load_dm_orders()
-    f = load_fct_product_sales()
 
-    u >> r >> t >> p >> o >> f
+    u >> r >> t >> p
 
 
 dag = dds_full_refresh()
